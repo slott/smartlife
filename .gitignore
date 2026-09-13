@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+session.json
+login_qr.png
+recordings/
+extracted_sd_recordings/
+*.webm
+*.mp4
+*.h264
+*.hevc
+.DS_Store
