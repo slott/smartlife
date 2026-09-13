@@ -48,15 +48,16 @@ def cmd_cameras(args, client: SmartLifeClient):
         print("No cameras found in account.")
         return
 
-    print("\n" + "=" * 70)
-    print(f" {'#':<3} {'Camera Name':<28} {'Status':<10} {'Device ID'}")
-    print("=" * 70)
+    print("\n" + "=" * 80)
+    print(f" {'#':<3} {'Camera Name':<20} {'Room':<18} {'Status':<10} {'Device ID'}")
+    print("=" * 80)
     for idx, cam in enumerate(cameras, start=1):
         status = "ONLINE" if cam.get("online") else "OFFLINE"
         name = cam.get("deviceName", "Unknown")
+        room = cam.get("room", "Unknown")
         dev_id = cam.get("devId", "N/A")
-        print(f" {idx:<3} {name:<28} {status:<10} {dev_id}")
-    print("=" * 70)
+        print(f" {idx:<3} {name:<20} {room:<18} {status:<10} {dev_id}")
+    print("=" * 80)
 
 
 def cmd_events(args, client: SmartLifeClient):

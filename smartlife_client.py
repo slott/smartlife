@@ -4,7 +4,7 @@ Smart Life / Tuya Web Camera & SD Card Client
 =============================================
 Communicates with https://protect-eu.ismartlife.me to:
 1. Authenticate and persist login sessions (QR code scan).
-2. Query connected cameras and their online statuses.
+2. Query connected cameras, rooms, and online statuses.
 3. Query recorded events / timeline segments on each camera's MicroSD card.
 4. Stream and pull/record selected events from the SD card to MP4 files.
 """
@@ -16,7 +16,7 @@ import json
 import base64
 import subprocess
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 try:
@@ -76,28 +76,28 @@ class SmartLifeClient:
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             page = context.new_page()
-
             page.goto(self.playback_url, wait_until="networkidle")
 
-            # If redirected to login, find and present the QR code
             if "login" in page.url:
                 print("\nWaiting for QR code to render...")
-                qr_img = page.wait_for_selector("img[src^='data:image']", timeout=15000)
-                if qr_img:
-                    src = qr_img.get_attribute("src") or ""
-                    if "base64," in src:
-                        b64_data = src.split("base64,")[1]
-                        qr_bytes = base64.b64decode(b64_data)
-                        qr_path = Path("login_qr.png")
-                        with open(qr_path, "wb") as f:
-                            f.write(qr_bytes)
-                        print(f"QR code saved to: {qr_path.resolve()}")
-                        if sys.platform == "darwin" and not headed:
-                            subprocess.run(["open", str(qr_path)], check=False)
+                try:
+                    qr_img = page.wait_for_selector("img[src^='data:image']", timeout=15000)
+                    if qr_img:
+                        src = qr_img.get_attribute("src") or ""
+                        if "base64," in src:
+                            b64_data = src.split("base64,")[1]
+                            qr_bytes = base64.b64decode(b64_data)
+                            qr_path = Path("login_qr.png")
+                            with open(qr_path, "wb") as f:
+                                f.write(qr_bytes)
+                            print(f"QR code saved to: {qr_path.resolve()}")
+                            if sys.platform == "darwin" and not headed:
+                                subprocess.run(["open", str(qr_path)], check=False)
+                except Exception as e:
+                    print("Notice while looking for QR code:", e)
 
                 print(f"\n[!] Please scan the QR code using the Smart Life app within {timeout} seconds...")
 
-                # Wait for redirect to /playback
                 start_time = time.time()
                 while time.time() - start_time < timeout:
                     if "playback" in page.url:
@@ -142,11 +142,51 @@ class SmartLifeClient:
 
     def get_cameras(self) -> List[Dict[str, Any]]:
         """
-        Retrieves the list of cameras associated with the account.
-        Returns a list of dictionaries with device details.
+        Retrieves the list of cameras and rooms associated with the account.
         """
+        cameras = []
+        captured = False
+
         with sync_playwright() as p:
-            browser, context, page = self._get_authenticated_context(p)
+            browser, context, page = self._get_authenticated_context(p, headless=True)
+
+            def handle_response(response: Response):
+                nonlocal cameras, captured
+                if "/api/new/common/roomList" in response.url:
+                    try:
+                        data = response.json()
+                        rooms = data.get("result", [])
+                        room_map = {}
+                        # Map deviceId to roomName
+                        for r in rooms:
+                            r_name = r.get("roomName", "")
+                            if r_name != "All Devices":
+                                for d in r.get("deviceList", []):
+                                    room_map[d.get("deviceId")] = r_name
+
+                        # Extract from All Devices
+                        for r in rooms:
+                            if r.get("roomId") == "ALL_DEVICE" or r.get("roomName") == "All Devices":
+                                for dev in r.get("deviceList", []):
+                                    dev_id = dev.get("deviceId")
+                                    cameras.append(
+                                        {
+                                            "devId": dev_id,
+                                            "deviceName": dev.get("deviceName", "Unknown"),
+                                            "room": room_map.get(dev_id, "Default Room"),
+                                            "online": dev.get("online", False),
+                                            "category": dev.get("category", ""),
+                                            "p2pType": dev.get("p2pType", 4),
+                                            "productId": dev.get("productId", ""),
+                                        }
+                                    )
+                                captured = True
+                                break
+                    except Exception:
+                        pass
+
+            page.on("response", handle_response)
+
             try:
                 page.goto(self.playback_url, wait_until="networkidle")
 
@@ -155,50 +195,10 @@ class SmartLifeClient:
                         "Session expired or invalid. Please re-run 'python smartlife.py login'."
                     )
 
-                # Fetch camera list from internal API using the page context
-                device_data = page.evaluate(
-                    """async () => {
-                        try {
-                            const res = await fetch('/api/device/sort/list');
-                            if (res.ok) {
-                                return await res.json();
-                            }
-                        } catch (e) {}
-                        return null;
-                    }"""
-                )
-
-                cameras = []
-                if isinstance(device_data, list):
-                    for dev in device_data:
-                        cameras.append(
-                            {
-                                "devId": dev.get("devId") or dev.get("deviceId"),
-                                "deviceName": dev.get("deviceName") or dev.get("name", "Unknown"),
-                                "online": dev.get("online", False),
-                                "category": dev.get("category", ""),
-                                "p2pType": dev.get("p2pType", 4),
-                                "productId": dev.get("productId", ""),
-                            }
-                        )
-
-                # Fallback: scrape from the DOM sidebar if API didn't return a direct list
-                if not cameras:
-                    page.wait_for_selector("[class*='deviceItem_box']", timeout=10000)
-                    items = page.locator("[class*='deviceItem_box']").all()
-                    for idx, item in enumerate(items):
-                        text = item.inner_text().strip()
-                        is_online = "device_online" in (item.get_attribute("class") or "")
-                        cameras.append(
-                            {
-                                "devId": f"camera_{idx}",
-                                "deviceName": text or f"Camera {idx + 1}",
-                                "online": is_online,
-                                "category": "sp",
-                                "p2pType": 4,
-                                "productId": "",
-                            }
-                        )
+                # Wait briefly if response is still incoming
+                start_w = time.time()
+                while not captured and time.time() - start_w < 5:
+                    page.wait_for_timeout(300)
 
                 return cameras
             finally:
@@ -209,14 +209,9 @@ class SmartLifeClient:
     ) -> List[Dict[str, Any]]:
         """
         Queries recorded events on the camera's MicroSD card for a specific date (YYYY-MM-DD).
-        Defaults to today.
-        Returns list of events with start time, end time, and duration.
         """
         if not target_date:
             target_date = datetime.now().strftime("%Y-%m-%d")
-
-        dt = datetime.strptime(target_date, "%Y-%m-%d")
-        year, month, day = dt.year, dt.month, dt.day
 
         sd_events = []
         captured_response = False
@@ -229,8 +224,9 @@ class SmartLifeClient:
                 if "/api/jarvis/sd/list" in response.url:
                     try:
                         data = response.json()
-                        if isinstance(data, list):
-                            sd_events = data
+                        raw_list = data.get("result", [])
+                        if isinstance(raw_list, list):
+                            sd_events = raw_list
                             captured_response = True
                     except Exception:
                         pass
@@ -241,44 +237,34 @@ class SmartLifeClient:
                 page.goto(self.playback_url, wait_until="networkidle")
 
                 if "login" in page.url:
-                    raise PermissionError(
-                        "Session expired. Please re-run 'python smartlife.py login'."
-                    )
+                    raise PermissionError("Session expired. Please re-run 'python smartlife.py login'.")
 
-                # Switch to SD playback tab: index 2 of typeSwitch_item
+                # 1. Switch to SD tab (third item in typeSwitch_item)
                 page.wait_for_selector("[class*='typeSwitch_item']", timeout=15000)
                 tab_items = page.locator("[class*='typeSwitch_item']").all()
                 if len(tab_items) >= 3:
                     tab_items[2].click()
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(800)
 
-                # Find and click the matching camera in the sidebar
-                page.wait_for_selector("[class*='deviceItem_box']", timeout=15000)
-                device_nodes = page.locator("[class*='deviceItem_box']").all()
-                matched_node = None
-                for node in device_nodes:
-                    text = node.inner_text().strip()
-                    if camera_identifier.lower() in text.lower():
-                        matched_node = node
-                        break
+                # 2. Expand 'All Devices' tree node
+                all_devices = page.locator(".ant-tree-node-content-wrapper:has-text('All Devices')")
+                if all_devices.count() > 0:
+                    all_devices.first.click()
+                    page.wait_for_timeout(600)
 
-                if not matched_node and device_nodes:
-                    # If camera_identifier is an index like '0', '1'
-                    try:
-                        idx = int(camera_identifier)
-                        if 0 <= idx < len(device_nodes):
-                            matched_node = device_nodes[idx]
-                    except ValueError:
-                        pass
+                # 3. Select target camera
+                cam_node = page.locator(f".ant-tree-node-content-wrapper:has-text('{camera_identifier}')")
+                if cam_node.count() > 0:
+                    cam_node.first.click()
+                else:
+                    # Try partial match or index
+                    titles = page.locator(".ant-tree-title").all()
+                    for t in titles:
+                        if camera_identifier.lower() in t.inner_text().strip().lower():
+                            t.click()
+                            break
 
-                if not matched_node and device_nodes:
-                    matched_node = device_nodes[0]
-
-                if matched_node:
-                    matched_node.click()
-                    page.wait_for_timeout(2000)
-
-                # Change date if needed
+                # 4. Change date if not today
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if target_date != today_str:
                     date_input = page.locator(".ant-picker-input input")
@@ -286,12 +272,12 @@ class SmartLifeClient:
                         date_input.first.click()
                         date_input.first.fill(target_date)
                         page.keyboard.press("Enter")
-                        page.wait_for_timeout(2000)
+                        page.wait_for_timeout(1000)
 
                 # Wait for the SD list response
                 start_w = time.time()
-                while not captured_response and time.time() - start_w < 12:
-                    page.wait_for_timeout(500)
+                while not captured_response and time.time() - start_w < 10:
+                    page.wait_for_timeout(400)
 
                 # Format results
                 formatted = []
@@ -326,7 +312,7 @@ class SmartLifeClient:
     ) -> str:
         """
         Pulls / records a specific SD event from the camera's MicroSD card.
-        Plays the event over WebRTC in the browser and captures the decoded stream into an MP4 file.
+        Plays the event over WebRTC in the browser and captures the decoded canvas into an MP4 file.
         """
         events = self.get_sd_events(camera_identifier, target_date)
         if not events:
@@ -372,18 +358,28 @@ class SmartLifeClient:
                 tab_items = page.locator("[class*='typeSwitch_item']").all()
                 if len(tab_items) >= 3:
                     tab_items[2].click()
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(800)
+
+                # Expand All Devices
+                all_dev = page.locator(".ant-tree-node-content-wrapper:has-text('All Devices')")
+                if all_dev.count() > 0:
+                    all_dev.first.click()
+                    page.wait_for_timeout(500)
 
                 # Select camera
-                page.wait_for_selector("[class*='deviceItem_box']", timeout=15000)
-                nodes = page.locator("[class*='deviceItem_box']").all()
-                for node in nodes:
-                    if camera_identifier.lower() in node.inner_text().strip().lower():
-                        node.click()
-                        break
-                page.wait_for_timeout(2000)
+                cam_node = page.locator(f".ant-tree-node-content-wrapper:has-text('{camera_identifier}')")
+                if cam_node.count() > 0:
+                    cam_node.first.click()
+                else:
+                    titles = page.locator(".ant-tree-title").all()
+                    for t in titles:
+                        if camera_identifier.lower() in t.inner_text().strip().lower():
+                            t.click()
+                            break
 
-                # Select date if needed
+                page.wait_for_timeout(3000)
+
+                # Change date if needed
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if target_date != today_str:
                     date_input = page.locator(".ant-picker-input input")
@@ -396,49 +392,36 @@ class SmartLifeClient:
                 # Inject WebRTC / Canvas MediaRecorder
                 recorder_js = """
                 () => {
-                    window.__recordedChunks = [];
-                    const video = document.querySelector('video') || document.querySelector('canvas');
-                    if (!video) return { error: "No video or canvas element found" };
-
-                    let stream;
-                    if (video.captureStream) {
-                        stream = video.captureStream(30);
-                    } else {
-                        return { error: "captureStream not supported" };
-                    }
-
-                    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
-                        ? 'video/webm;codecs=vp8,opus'
-                        : 'video/webm';
-
-                    window.__rec = new MediaRecorder(stream, { mimeType });
-                    window.__rec.ondataavailable = (e) => {
-                        if (e.data && e.data.size > 0) {
-                            window.__recordedChunks.push(e.data);
+                    window.__chunks = [];
+                    const canvases = document.querySelectorAll('canvas');
+                    let playerCanvas = null;
+                    for (const c of canvases) {
+                        const rect = c.getBoundingClientRect();
+                        if (rect.width > 300 && rect.height > 200) {
+                            playerCanvas = c;
+                            break;
                         }
+                    }
+                    if (!playerCanvas) return { error: "Player canvas not ready" };
+
+                    const stream = playerCanvas.captureStream(25);
+                    const rec = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                    rec.ondataavailable = (e) => {
+                        if (e.data && e.data.size > 0) window.__chunks.push(e.data);
                     };
-                    window.__rec.start(100);
-                    return { ok: true };
+                    window.__rec = rec;
+                    rec.start(100);
+                    return { ok: true, width: playerCanvas.width, height: playerCanvas.height };
                 }
                 """
-
-                # Trigger seek / play
-                page.evaluate(
-                    f"""() => {{
-                        const canvas = document.querySelector('canvas');
-                        if (canvas) canvas.click();
-                    }}"""
-                )
 
                 # Start recording
                 res = page.evaluate(recorder_js)
                 if res.get("error"):
-                    print(f"Warning: {res['error']}, retrying after video load...")
                     page.wait_for_timeout(3000)
-                    page.evaluate(recorder_js)
+                    res = page.evaluate(recorder_js)
 
                 print(f"Streaming and capturing video ({record_dur}s)...")
-                # Progress display
                 steps = max(1, record_dur)
                 for s in range(steps):
                     time.sleep(1)
@@ -453,11 +436,10 @@ class SmartLifeClient:
                     return new Promise((resolve) => {
                         if (!window.__rec) return resolve("");
                         window.__rec.onstop = async () => {
-                            const blob = new Blob(window.__recordedChunks, { type: 'video/webm' });
+                            const blob = new Blob(window.__chunks, { type: 'video/webm' });
                             const reader = new FileReader();
                             reader.onloadend = () => {
-                                const base64 = reader.result.split(',')[1] || "";
-                                resolve(base64);
+                                resolve(reader.result.split(',')[1] || "");
                             };
                             reader.readAsDataURL(blob);
                         };
@@ -487,8 +469,6 @@ class SmartLifeClient:
                         str(webm_temp),
                         "-c:v",
                         "copy",
-                        "-c:a",
-                        "aac",
                         str(out_path),
                     ]
                     sub = subprocess.run(cmd, capture_output=True, text=True)
@@ -497,7 +477,7 @@ class SmartLifeClient:
                         print(f"Successfully saved to: {out_path.resolve()}")
                         return str(out_path)
                     else:
-                        print(f"Notice: ffmpeg remux fallback. WebM video saved at: {webm_temp.resolve()}")
+                        print(f"Notice: saved as WebM: {webm_temp.resolve()}")
                         return str(webm_temp)
                 except FileNotFoundError:
                     print(f"ffmpeg not found. Saved as WebM: {webm_temp.resolve()}")
