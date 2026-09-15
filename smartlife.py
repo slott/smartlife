@@ -26,7 +26,7 @@ import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
-from smartlife_client import SmartLifeClient
+from smartlife_client import SmartLifeClient, SmartLifeError, CameraBusyError, EventNotFoundError
 
 
 def cmd_login(args, client: SmartLifeClient):
@@ -101,37 +101,13 @@ def cmd_pull(args, client: SmartLifeClient):
 
 def cmd_pull_all(args, client: SmartLifeClient):
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
-    print(f"Querying all events for camera '{args.camera}' on {date_str}...")
-    events = client.get_sd_events(args.camera, date_str)
-    if not events:
-        print(f"No events found for {date_str}.")
-        return
-
-    out_dir = Path(args.output_dir or "./recordings")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Found {len(events)} events. Downloading to {out_dir.resolve()}...")
-    for ev in events:
-        ev_id = ev["id"]
-        clean_cam = "".join(c if c.isalnum() else "_" for c in args.camera)
-        clean_time = ev["startTime"].replace(" ", "_").replace(":", "-")
-        target_path = out_dir / f"{clean_cam}_{clean_time}.mp4"
-
-        if target_path.exists():
-            print(f"Skipping Event #{ev_id} (already downloaded: {target_path.name})")
-            continue
-
-        print(f"\nProcessing [{ev_id}/{len(events)}] - {ev['startTime']} ({ev['duration']}s)")
-        try:
-            client.pull_event(
-                camera_identifier=args.camera,
-                target_date=date_str,
-                event_index=ev_id,
-                output_path=str(target_path),
-                max_duration=args.max_duration,
-            )
-        except Exception as e:
-            print(f"Error pulling event #{ev_id}: {e}")
+    saved = client.pull_all_events(
+        camera_identifier=args.camera,
+        target_date=date_str,
+        output_dir=args.output_dir,
+        max_duration=args.max_duration,
+    )
+    print(f"\nAll done! Processed {len(saved)} recording(s).")
 
 
 def main():
@@ -182,16 +158,32 @@ def main():
     args = parser.parse_args()
     client = SmartLifeClient(portal_url=args.portal_url, session_path=args.session)
 
-    if args.command == "login":
-        cmd_login(args, client)
-    elif args.command == "cameras":
-        cmd_cameras(args, client)
-    elif args.command == "events":
-        cmd_events(args, client)
-    elif args.command == "pull":
-        cmd_pull(args, client)
-    elif args.command == "pull-all":
-        cmd_pull_all(args, client)
+    try:
+        if args.command == "login":
+            cmd_login(args, client)
+        elif args.command == "cameras":
+            cmd_cameras(args, client)
+        elif args.command == "events":
+            cmd_events(args, client)
+        elif args.command == "pull":
+            cmd_pull(args, client)
+        elif args.command == "pull-all":
+            cmd_pull_all(args, client)
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
+        sys.exit(130)
+    except CameraBusyError as e:
+        print(f"\n[Camera Busy] {e}")
+        sys.exit(1)
+    except EventNotFoundError as e:
+        print(f"\n[Not Found] {e}")
+        sys.exit(1)
+    except SmartLifeError as e:
+        print(f"\n[Error] {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n[Error] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
