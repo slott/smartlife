@@ -12,7 +12,7 @@ Instead:
 1. **Camera Discovery**: Devices are managed via Tuya's backend APIs (`/api/device/sort/list` and `/api/new/common/homeList`).
 2. **SD Card Event Querying**: Recorded time segments on the SD card are queried for any target date via `/api/jarvis/sd/list`.
 3. **P2P Video Streaming**: To view or pull content, the web portal negotiates a WebRTC session (`/api/jarvis/sd/allocate` and `/api/jarvis/sd/play`) directly with the camera via Tuya's MQTT signaling broker (`m1.tuyaeu.com`). The camera then streams the H.264 / H.265 video chunks.
-4. **Pulling Recordings**: Our script leverages Playwright to automate session management, trigger the WebRTC playback stream, capture the decoded video stream via `MediaRecorder`, and remux it into clean, standalone `.mp4` video files using `ffmpeg`.
+4. **Direct Hardware Stream Pulling**: Our tool taps directly into the WebRTC `fmp4Stream` DataChannel to capture the camera's original, untouched 2560x1440 (2K QHD) H.265 / HEVC bitstream and 16-bit 8 kHz PCM audio packets—bypassing browser software downscaling and canvas re-encoding entirely. It dynamically synchronizes the video frame rate against the hardware audio clock and muxes into pristine, QuickTime-ready MP4 files (`hvc1` + AAC).
 5. **Direct SD Card Extraction**: If you ever mount the physical MicroSD card directly to your computer, [`extract_tuya_sd.py`](file:///Users/msh/git/smartlife/extract_tuya_sd.py) decodes the camera's raw `.media` binary frames into standard MP4 files in seconds.
 
 ---
